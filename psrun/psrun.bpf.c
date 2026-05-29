@@ -118,7 +118,7 @@ int handle_sched_switch(struct trace_event_raw_sched_switch *ctx)
 	pid_t next_pid = ctx->next_pid;
 	char *next_comm = BPF_CORE_READ(ctx, next_comm);
 
-        u64 *tsp, slot;
+        u64 *tsp;
         s64 delta;
         u64 ts;
 	struct hist *hp = NULL;
@@ -128,12 +128,11 @@ int handle_sched_switch(struct trace_event_raw_sched_switch *ctx)
 		.comm = "",
 	};
 
-	if (prev_state == TASK_RUNNING) {
-		if (!goskip(prev_pid)) {
-        		ts = bpf_ktime_get_ns();
-        		bpf_map_update_elem(&start, &prev_pid, &ts, BPF_ANY);
-        		return 0;
-		}
+	/* prev still runnable: preempted, back on run queue — start timing */
+	if (prev_state == TASK_RUNNING && prev_pid != 0 &&
+	    prev_pid != next_pid && !goskip(prev_pid)) {
+		ts = bpf_ktime_get_ns();
+		bpf_map_update_elem(&start, &prev_pid, &ts, BPF_ANY);
 	}
 
 	if (goskip(next_pid))
