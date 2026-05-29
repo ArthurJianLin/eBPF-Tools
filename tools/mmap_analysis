@@ -1,0 +1,133 @@
+#!/bin/bash
+
+#######################################################################################
+#   DESCRIPTION : A script used to analyse mmap/munmap memory
+#   AUTHOR      : Guanbing Huang
+#
+#   HISTORY     :
+#       2025-12-24 -- Guanbing Huang written
+#######################################################################################
+
+RECORD_MMAP_DATA_FILE="rd_mmap_data"
+RECORD_MMAP_DATA_TMP_FILE="rd_mmap_data.tmp"
+RECORD_MUNMAP_DATA_FILE="rd_munmap_data"
+
+function merge_mmap_mnumap()
+{
+	if [ ! -f "${RECORD_MMAP_DATA_FILE}" ]; then
+		echo "Error: ${RECORD_MMAP_DATA_FILE} not exist!"
+	    	exit 1
+	fi
+
+	if [ ! -f "${RECORD_MUNMAP_DATA_FILE}" ]; then
+	    	echo "Error: ${RECORD_MUNMAP_DATA_FILE} not exist!"
+	    	exit 1
+	fi
+
+	cp ${RECORD_MMAP_DATA_FILE} ${RECORD_MMAP_DATA_TMP_FILE}
+
+	# Read file content line by line
+	# IFRS=Retain spaces at the beginning and end of the line
+	# -R prohibits the escape of backslashes and maintains its original meaning
+	while IFS= read -r line; do
+	    	addr=$(echo ${line} | awk '{print $6}')
+	    	sed -i "/${addr}/s/ M / U /" "${RECORD_MMAP_DATA_TMP_FILE}"
+	done < "${RECORD_MUNMAP_DATA_FILE}"
+}
+
+# Such as 1KB, 1.5KB, 2MB, 3GB, 4k, 5m, 6g, convert to bytes
+function size_to_bytes() {
+	local size_str="$1"
+    	local num unit bytes
+
+    	if [[ -z "${size_str}" ]]; then
+        	echo "Error: Please enter a valid size (such as 1KB, 2MB)" >&2
+        	return 1
+    	fi
+
+    	# Extract the numerical part (supports integers/decimals, such as 1.5GB) and the unit part
+    	# Regular matching: number (including decimal point)+unit (K/M/G+optional B), case ignored
+    	if [[ "${size_str}" =~ ^([0-9.]+)([KkMmGg])(B?) ]]; then
+        	num="${BASH_REMATCH[1]}"
+        	unit="${BASH_REMATCH[2]}"
+    	else
+        	# Default byte processing when there is no unit
+        	if [[ "${size_str}" =~ ^[0-9.]+$ ]]; then
+            		echo "${size_str}"
+            		return 0
+        	else
+            		echo "Error: Unsupported size format '${sizestr}', only supports KB/MB/GB (both uppercase and lowercase)" >&2
+            		return 1
+        	fi
+    	fi
+
+    	# Convert to bytes, 1K=1024, 1M=1024*1024, 1G=1024^3
+    	case "${unit}" in
+        	K|k)
+            		bytes=$(echo "${num} * 1024" | bc)
+            		;;
+        	M|m)
+            		bytes=$(echo "${num} * 1024 * 1024" | bc)
+            		;;
+        	G|g)
+            		bytes=$(echo "${num} * 1024 * 1024 * 1024" | bc)
+            		;;
+    	esac
+
+    	# Output result, excluding decimals and retaining integers
+    	echo "${bytes}" | awk -F. '{print $1}'
+}
+
+function mmap_analysis()
+{
+	comm=$1
+	size=$2
+	bytes=$(size_to_bytes "${size}")
+	echo "bytes = ${bytes}"
+
+	merge_mmap_mnumap
+
+	while IFS= read -r line; do
+		ret=0
+		if [[ -z "${comm}" ]]; then
+			ret=0
+		else
+			echo  "${line}" | grep -q "${comm}"
+			ret=$?
+		fi
+		if [[ ${ret} -eq 0 ]]; then
+			len=$(echo ${line} | awk '{print $7}')
+			if [[ "${len}" -ge "${bytes}" ]]; then
+				echo "${line}"
+			fi
+		fi
+	done < "${RECORD_MMAP_DATA_TMP_FILE}"
+}
+
+comm=""
+size="0KB"
+while getopts "c:b:h" opt; do
+	case "${opt}" in
+		c)
+            		comm="${OPTARG}"
+            		;;
+        	b)
+            		size="${OPTARG}"
+            		;;
+        	h)
+            		echo "Usage: $0 -c <comm> -b <mem size>"
+            		echo "Example: $0 -c mmap -b 1G"
+            		exit 0
+            		;;
+        	\?)
+            		echo "Error: Invalid parameter -${OPTARG}"
+            		exit 1
+            		;;
+        	:)
+            		echo "Error: The parameter -${OPTARG} requires a value"
+            		exit 1
+            		;;
+    	esac
+done
+
+mmap_analysis "${comm}" "${size}"
