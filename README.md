@@ -12,6 +12,7 @@
 | [io](#io) | `io/` | 追踪块设备 I/O 请求，支持按进程、磁盘、延迟过滤 |
 | [iofsstat](#iofsstat) | `iofsstat/` | 按进程/设备统计文件系统 I/O |
 | [psrun](#psrun) | `psrun/` | 追踪进程调度等待时间，长等待时可打印调用栈 |
+| [numawake](#numawake) | `numawake/` | 观测 CFS 唤醒路径上的跨 NUMA 决策、落地偏离与 runqueue 延迟（面向 Linux 4.19） |
 | [pslife](#pslife) | `pslife/` | 追踪进程的 fork / kill 事件 |
 | [funcstack](#funcstack) | `funcstack/` | 对内核函数挂 kprobe/kretprobe/tracepoint，打印调用栈 |
 | [exec_trace](#exec_trace) | `exec_trace/` | 追踪执行指定命令的进程 |
@@ -36,7 +37,7 @@ ln -s /path/to/libbpf libbpf
 # bpftool 已预置在 tools/ 目录，也可自行替换为与内核版本匹配的版本
 ```
 
-项目使用 libbpf **v1.5.0** 构建，各子目录 `Makefile` 会在编译时自动切换 libbpf 版本。
+项目使用 libbpf **v1.5.0** 构建，各子目录 `Makefile` 会在编译时自动切换 libbpf 版本。例外：`numawake/` 面向 **Linux 4.19**，使用 libbpf **v0.5.0** 与 `vmlinux/4.19/` 头文件。
 
 ### 2. 编译单个工具
 
@@ -51,7 +52,7 @@ cd io && make         # 生成 ../bin/io
 ### 3. 编译全部工具
 
 ```bash
-for d in slabtop mmap mutex io iofsstat psrun pslife funcstack exec_trace filewatch kvmmon; do
+for d in slabtop mmap mutex io iofsstat psrun numawake pslife funcstack exec_trace filewatch kvmmon; do
     (cd "$d" && make)
 done
 ```
@@ -124,6 +125,20 @@ done
 ./bin/psrun -s 100             # 等待超过 100ms 时 dump 调用栈
 ```
 
+### numawake
+
+观测 CFS 唤醒路径上的 NUMA 相关调度决策：`select_task_rq_fair` 选核、`sched_wakeup` / `sched_migrate_task` 入队、`sched_switch` 首次运行。统计决策层跨 NUMA wake、入队与落地 CPU 偏离，以及 runqueue 等待延迟直方图。详见 [numawake/README.md](numawake/README.md) 与 [numawake/SEMANTICS.md](numawake/SEMANTICS.md)。
+
+**目标内核：Linux 4.19**（kprobe/kretprobe，非 CO-RE）。建议先用 `verify_symbol` 确认 `select_task_rq_fair` 可挂载。
+
+```bash
+cd numawake && make            # 生成 ../bin/numawake、../bin/verify_symbol、../bin/numawake_topo
+sudo ./bin/verify_symbol -d 5  # 验证探针与事件比例
+sudo ./bin/numawake -i 3       # 每 3 秒打印累计统计
+sudo ./bin/numawake -p 1234    # 仅追踪指定 PID
+./bin/numawake_topo            # 查看 NUMA 拓扑
+```
+
 ### pslife
 
 追踪进程的 fork 与 kill 事件，记录时间戳与进程信息。
@@ -188,6 +203,7 @@ done
 ├── bin/             # 编译产物（make 后生成）
 ├── slabtop/         # 各工具源码目录
 ├── mmap/
+├── numawake/        # 跨 NUMA wake 观测（4.19）
 ├── ...
 └── LICENSE
 ```
@@ -204,6 +220,7 @@ done
 
 - 所有工具需要 root 权限运行。
 - 内核需开启 `CONFIG_DEBUG_INFO_BTF` 以支持 CO-RE；部分工具在内核 4.19 上可使用 `vmlinux/4.19/` 头文件。
+- **numawake** 专为 4.19 设计（`CONFIG_KALLSYMS_ALL` 下可挂 `select_task_rq_fair` kretprobe），不依赖内核 BTF。
 - `RLIMIT_MEMLOCK` 不足时工具会自动尝试提升限制；若仍失败请手动调整。
 - `filewatch` 等工具通过 kprobe 挂载，在高负载场景下可能有一定性能开销。
 
