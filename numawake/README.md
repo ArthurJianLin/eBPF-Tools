@@ -83,6 +83,87 @@ sudo sysctl -w kernel.perf_event_paranoid=-1
 
 延迟本质是 **runqueue 等待时间**（与 [psrun](../psrun/psrun.bpf.c) 同类），不是 NUMA 内存访问延迟。详见 [SEMANTICS.md](SEMANTICS.md)。
 
+**读直方图注意**：`cross_numa_lat` / `same_numa_lat` 应按**比例**对比（例如 >1 ms 占比），不要直接比较绝对柱高——`same_numa_wake` 样本量通常远大于 `cross_numa_wake`。
+
+---
+
+## 业务解读与调优
+
+numawake 是 **调度侧 locality 体检仪**：回答「唤醒决策是否跨 NUMA、入队后排队久不久、入队后是否稳定落地」。它**不能**单独证明远端内存慢或业务 RT 变差，宜与业务 P99、`numastat` 等同一时间轴对照。
+
+### 唤醒路径与指标锚点
+
+```
+select_task_rq_fair(prev_cpu → chosen_cpu)   # 调度器决策；cross/same 看 node(prev) vs node(chosen)
+  → [可选] sched_migrate_task(enqueue_cpu)   # 入队前修正；sanity_mismatch = chosen ≠ enqueue
+  → sched_wakeup(enqueue_cpu)                # 确认入队
+  → runqueue 等待                            # 延迟起点：最后一次 pre-wakeup migrate，否则 wakeup
+  → sched_switch(first_run_cpu)              # landing_deviation = enqueue ≠ first_run
+```
+
+- **cross / same 分桶**由 `chosen_cpu` 决定，与 `enqueue` / `first_run` 无关。
+- **延迟**不从 `select` 起算，避免把「选核 + migrate」与「纯排队」混在一起。
+
+### 业务上能说明什么
+
+| 观测 | 可支撑的结论（需结合 `-p` 过滤与窗口增量） |
+|------|---------------------------------------------|
+| 某 PID **cross 比例高** | 该 workload 唤醒路径里，调度器**经常**决策放到唤醒前节点之外的 CPU |
+| cross **长尾比例**明显高于 same | 跨节点 wake **更常**伴随更长 runqueue 等待（尾延迟风险 proxy） |
+| **landing_deviation** 高 | 已入队 CPU 与首次运行 CPU 不一致，placement 与负载均衡在「打架」 |
+| same 高延迟 | 更像 **节点内 / 目标核过忙**，不一定是跨 NUMA 问题 |
+| cross 高但延迟多在 0–1 ms | 跨节点 wake 频繁，但远端核常更空——可能是追 idle，**未必是坏事** |
+
+**不能单靠 numawake 断言的**：远端内存 / cache 代价、业务 QPS/RT 根因、「应该绑在哪个 node」（需内存策略、部署拓扑、SLA）。
+
+### 推荐操作流程
+
+1. **锁定对象**：`sudo ./bin/numawake -p <pid> -i 10`，在高峰 / 压测 / 故障窗口各采一段。
+2. **看窗口增量**：两次打印相减（累计值会随运行时间单调增）。
+3. **对齐拓扑**：`./bin/numawake_topo`。
+4. **填决策表**（针对该窗口增量）：
+
+| 模式 | 优先怀疑 |
+|------|----------|
+| cross 比例高 + cross 长尾比例高 | locality；绑核 / membind |
+| cross 比例高 + 延迟仍 mostly 0–1 ms | 追空闲；再查内存是否在远端（`numastat -p`） |
+| same 比例高 + 延迟长尾高 | 节点内拥塞；IRQ、过载、亲和过窄 |
+| landing_deviation 高 | 入队后又被 pull；cpuset 过宽、负载均衡 |
+
+5. **与业务指标对齐**：仅当 cross 升高且业务 P99 同时变差时，才强烈建议动 NUMA/绑核。
+
+### 调优动作（按模式）
+
+**A. cross 高 + cross 长尾明显高于 same**
+
+目标：唤醒后尽量在内存所在节点执行。
+
+```bash
+numactl --cpunodebind=0 --membind=0 ./your_app
+# 或 taskset -c <node-cpus> ./your_app
+echo 0 | sudo tee /proc/sys/kernel/numa_balancing   # 评估全局影响后再用
+```
+
+容器 / K8s：考虑 `topologyManager: single-numa-node`、Guaranteed + 明确 CPU/内存请求。
+
+**B. cross 不低，但延迟几乎都在 0–1 ms**
+
+先查内存分布：`numastat -p <pid>`、`/proc/<pid>/numa_maps`。内存已跨节点则 membind+cpunodebind 一起做；内存本地则往往绑 CPU 即可。
+
+**C. same NUMA 高延迟**
+
+查 node 内 CPU 利用率、`mpstat`；考虑 IRQ 绑核、`isolcpus`、避免线程挤在同一 cache domain。
+
+**D. landing_deviation 高**
+
+缩小 cpuset、对延迟敏感进程绑核；与 cross 分开看——「决策没跨节点但被拽走」时重点抑制迁移而非 membind。
+
+### 结论表述模板
+
+> 在时段 T、进程 P 上，cross NUMA wake 占 X%，该类 wake 的 runqueue >1 ms 比例为 A%，同 NUMA 为 B%（约 A/B 倍）；landing_deviation 为 Y%。建议对 P 做 numactl 试点后复测 cross 比例与业务 P99。
+
+相对 [SEMANTICS.md](SEMANTICS.md) 默认 baseline（`node(prev_cpu)`），cross 高表示调度器**主动**跨节点决策，**不等于 bug**；是否调优取决于业务对尾延迟与全机利用率的取舍。
+
 ---
 
 ## 重点逻辑处理
