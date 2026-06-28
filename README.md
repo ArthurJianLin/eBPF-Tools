@@ -129,11 +129,10 @@ done
 
 观测 CFS 唤醒路径上的 NUMA 相关调度决策：`select_task_rq_fair` 选核、`sched_wakeup` / `sched_migrate_task` 入队、`sched_switch` 首次运行。统计决策层跨 NUMA wake、入队与落地 CPU 偏离，以及 runqueue 等待延迟直方图。详见 [numawake/README.md](numawake/README.md) 与 [numawake/SEMANTICS.md](numawake/SEMANTICS.md)。
 
-**目标内核：Linux 4.19**（kprobe/kretprobe，非 CO-RE）。建议先用 `verify_symbol` 确认 `select_task_rq_fair` 可挂载。
+**目标内核：Linux 4.19**（kprobe/kretprobe，非 CO-RE）。
 
 ```bash
-cd numawake && make            # 生成 ../bin/numawake、../bin/verify_symbol、../bin/numawake_topo
-sudo ./bin/verify_symbol -d 5  # 验证探针与事件比例
+cd numawake && make            # 生成 ../bin/numawake、../bin/numawake_topo
 sudo ./bin/numawake -i 3       # 每 3 秒打印累计统计
 sudo ./bin/numawake -p 1234    # 仅追踪指定 PID
 ./bin/numawake_topo            # 查看 NUMA 拓扑

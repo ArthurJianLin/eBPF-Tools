@@ -23,7 +23,6 @@ LIBBPF   = ../tools/libbpf.a.0.5.0
 LDLIBS  += $(LIBBPF) -lelf -lz -lrt -lzstd
 
 BPFTOOL = ../tools/bpftool
-BIN     = ../bin/verify_symbol
 NUMAWAKE_BIN = ../bin/numawake
 TOPO_BIN = ../bin/numawake_topo
 
@@ -34,10 +33,10 @@ define v0.5.0
 @(cd ../libbpf && git reset --hard v0.5.0 && cd -)
 endef
 
-all: $(BIN) bpf topo numawake
+all: bpf topo numawake
 
 clean:
-	rm -f ./*.o verify_symbol.skel.h numawake.skel.h numawake.bpf.o verify_symbol.bpf.o
+	rm -f ./*.o numawake.skel.h numawake.bpf.o
 
 numawake_topology.o: numawake_topology.c numawake_topology.h numawake.h
 	$(v0.5.0)
@@ -79,24 +78,8 @@ numawake: $(NUMAWAKE_BIN)
 
 topo: $(TOPO_BIN)
 
-verify_symbol.bpf.o: verify_symbol.bpf.c verify_symbol.h
-	$(v0.5.0)
-	$(CLANG) $(CFLAGS) $(CLANGFLAGS) -c -o $@ verify_symbol.bpf.c
-
-verify_symbol.skel.h: verify_symbol.bpf.o
-	$(BPFTOOL) gen skeleton verify_symbol.bpf.o > $@
-	@(sed -i 's@#include <bpf/libbpf.h>@#include "libbpf.h"@g' $@)
-
-verify_symbol_user.o: verify_symbol.c verify_symbol.skel.h
-	$(v0.5.0)
-	$(CC) $(CFLAGS) -g -c -o $@ verify_symbol.c
-
 ../libbpf/src/libbpf.a:
 	cd ../libbpf && git reset --hard v0.5.0 && make -C src && cd -
 
 ../tools/libbpf.a.0.5.0: ../libbpf/src/libbpf.a
 	cp ../libbpf/src/libbpf.a ../tools/libbpf.a.0.5.0
-
-$(BIN): ../tools/libbpf.a.0.5.0 verify_symbol.skel.h verify_symbol_user.o
-	$(v0.5.0)
-	$(CC) -static -g -o $@ verify_symbol_user.o $(LDLIBS)
