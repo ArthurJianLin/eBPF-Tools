@@ -13,6 +13,7 @@
 | [iofsstat](#iofsstat) | `iofsstat/` | 按进程/设备统计文件系统 I/O |
 | [psrun](#psrun) | `psrun/` | 追踪进程调度等待时间，长等待时可打印调用栈 |
 | [numawake](#numawake) | `numawake/` | 观测 CFS 唤醒路径上的跨 NUMA 决策、落地偏离与 runqueue 延迟（面向 Linux 4.19） |
+| [kvmpoll](#kvmpoll) | `kvmpoll/` | 观测 KVM halt poll 唤醒延迟、fail 路径归因与 OWN 代价模型（面向 Linux 4.19） |
 | [pslife](#pslife) | `pslife/` | 追踪进程的 fork / kill 事件 |
 | [funcstack](#funcstack) | `funcstack/` | 对内核函数挂 kprobe/kretprobe/tracepoint，打印调用栈 |
 | [exec_trace](#exec_trace) | `exec_trace/` | 追踪执行指定命令的进程 |
@@ -37,7 +38,7 @@ ln -s /path/to/libbpf libbpf
 # bpftool 已预置在 tools/ 目录，也可自行替换为与内核版本匹配的版本
 ```
 
-项目使用 libbpf **v1.5.0** 构建，各子目录 `Makefile` 会在编译时自动切换 libbpf 版本。例外：`numawake/` 面向 **Linux 4.19**，使用 libbpf **v0.5.0** 与 `vmlinux/4.19/` 头文件。
+项目使用 libbpf **v1.5.0** 构建，各子目录 `Makefile` 会在编译时自动切换 libbpf 版本。例外：`numawake/`、`kvmpoll/` 面向 **Linux 4.19**，使用 libbpf **v0.5.0** 与 `vmlinux/4.19/` 头文件。
 
 ### 2. 编译单个工具
 
@@ -52,7 +53,7 @@ cd io && make         # 生成 ../bin/io
 ### 3. 编译全部工具
 
 ```bash
-for d in slabtop mmap mutex io iofsstat psrun numawake pslife funcstack exec_trace filewatch kvmmon; do
+for d in slabtop mmap mutex io iofsstat psrun numawake kvmpoll pslife funcstack exec_trace filewatch kvmmon; do
     (cd "$d" && make)
 done
 ```
@@ -138,6 +139,28 @@ sudo ./bin/numawake -p 1234    # 仅追踪指定 PID
 ./bin/numawake_topo            # 查看 NUMA 拓扑
 ```
 
+### kvmpoll
+
+观测 KVM `kvm_vcpu_wakeup` tracepoint，统计 halt poll 成功/失败路径的延迟直方图，并量化 OWN（host CPU 权衡）代价模型。fail 路径上通过 `sched_switch` / `sched_wakeup` 拆分 event_wait（B1）与 runqueue（B2）；kprobe `kvm_vcpu_block` 入口配合调度 tracepoint 得到 `poll_actual`，用于 `mechanism_tax` 计算。详见 [kvmpoll/README.md](kvmpoll/README.md)。
+
+**目标内核：Linux 4.19**（tracepoint + kprobe，非 CO-RE）。
+
+```bash
+cd kvmpoll && make             # 生成 ../bin/kvmpoll
+sudo ./bin/kvmpoll -p $(pidof qemu-system-x86_64) -i 10
+sudo ./bin/kvmpoll -p $(pidof qemu-system-x86_64) -B 3200 -d 300 -q
+sudo ./bin/kvmpoll -a --scan-interval 60
+```
+
+| 选项 | 说明 |
+|------|------|
+| `-p PID` | 监控指定 QEMU 线程组 |
+| `-a` | 监控全部 QEMU（周期性 rescan） |
+| `-i SEC` | 打印间隔（默认 10） |
+| `-d SEC -q` | 固定时长采集，输出 `key=value` |
+| `-B NS` | OWN 公式中的 save_time 常数 B |
+| `-H NS` | 覆盖 module `halt_poll_ns` 作为 E |
+
 ### pslife
 
 追踪进程的 fork 与 kill 事件，记录时间戳与进程信息。
@@ -203,6 +226,7 @@ sudo ./bin/numawake -p 1234    # 仅追踪指定 PID
 ├── slabtop/         # 各工具源码目录
 ├── mmap/
 ├── numawake/        # 跨 NUMA wake 观测（4.19）
+├── kvmpoll/         # KVM halt poll 观测（4.19）
 ├── ...
 └── LICENSE
 ```
@@ -219,7 +243,7 @@ sudo ./bin/numawake -p 1234    # 仅追踪指定 PID
 
 - 所有工具需要 root 权限运行。
 - 内核需开启 `CONFIG_DEBUG_INFO_BTF` 以支持 CO-RE；部分工具在内核 4.19 上可使用 `vmlinux/4.19/` 头文件。
-- **numawake** 专为 4.19 设计（`CONFIG_KALLSYMS_ALL` 下可挂 `select_task_rq_fair` kretprobe），不依赖内核 BTF。
+- **numawake**、**kvmpoll** 专为 4.19 设计，不依赖内核 BTF；numawake 需 `CONFIG_KALLSYMS_ALL` 以挂 `select_task_rq_fair` kretprobe，kvmpoll 需 KVM tracepoint 与 `kvm_vcpu_block` kprobe 可用。
 - `RLIMIT_MEMLOCK` 不足时工具会自动尝试提升限制；若仍失败请手动调整。
 - `filewatch` 等工具通过 kprobe 挂载，在高负载场景下可能有一定性能开销。
 
